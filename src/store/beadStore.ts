@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { calculateCenterOfGravity as computeCOG } from '@/lib/cog'
 
 export const COLOR_PALETTE: Record<string, { hex: string; weight: number; name: string }> = {
   H01: { hex: '#FFFFFF', weight: 1.00, name: '乳白' },
@@ -175,69 +176,6 @@ export const useBeadStore = create<StoreState>((set, get) => ({
 
   calculateCenterOfGravity: () => {
     const s = get()
-    const beads = s.beads
-    const base = BASE_DIMENSIONS[s.baseType]
-    const halfGrid = (s.gridSize - 1) / 2
-
-    if (beads.length === 0) {
-      return {
-        x: 0, y: 0, z: 0,
-        projectedX: 0, projectedZ: 0,
-        withinBase: true,
-        overhangRatio: 0,
-        warningCells: [],
-      }
-    }
-
-    let totalWeight = 0
-    let sumX = 0, sumY = 0, sumZ = 0
-
-    for (const bead of beads) {
-      const color = COLOR_PALETTE[bead.colorId] || COLOR_PALETTE.H01
-      const w = color.weight
-      totalWeight += w
-      sumX += (bead.col - halfGrid) * (BEAD_SIZE + BEAD_GAP) * w
-      sumY += bead.layer * LAYER_HEIGHT * w
-      sumZ += (bead.row - halfGrid) * (BEAD_SIZE + BEAD_GAP) * w
-    }
-
-    const cogX = sumX / totalWeight
-    const cogY = sumY / totalWeight
-    const cogZ = sumZ / totalWeight
-
-    const baseHalfW = base.width / 2
-    const baseHalfD = base.depth / 2
-    const thresholdX = baseHalfW * 1.15
-    const thresholdZ = baseHalfD * 1.15
-
-    const overhangX = Math.max(0, Math.abs(cogX) - baseHalfW)
-    const overhangZ = Math.max(0, Math.abs(cogZ) - baseHalfD)
-    const maxOverhang = Math.max(overhangX / baseHalfW, overhangZ / baseHalfD)
-
-    const withinBase = Math.abs(cogX) <= thresholdX && Math.abs(cogZ) <= thresholdZ
-
-    const warningCells: Array<{ layer: number; row: number; col: number }> = []
-    if (!withinBase) {
-      for (const bead of beads) {
-        const bx = (bead.col - halfGrid) * (BEAD_SIZE + BEAD_GAP)
-        const bz = (bead.row - halfGrid) * (BEAD_SIZE + BEAD_GAP)
-        const dirX = Math.sign(cogX) || 1
-        const dirZ = Math.sign(cogZ) || 1
-        if (bx * dirX > baseHalfW * 0.8 || bz * dirZ > baseHalfD * 0.8) {
-          warningCells.push({ layer: bead.layer, row: bead.row, col: bead.col })
-        }
-      }
-    }
-
-    return {
-      x: cogX,
-      y: cogY,
-      z: cogZ,
-      projectedX: cogX,
-      projectedZ: cogZ,
-      withinBase,
-      overhangRatio: maxOverhang,
-      warningCells,
-    }
+    return computeCOG(s.beads, s.baseType, s.gridSize)
   },
 }))

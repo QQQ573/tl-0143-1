@@ -9,6 +9,7 @@ import {
   type BaseType,
   type CenterOfGravity,
 } from '@/store/beadStore'
+import { createBaseByType } from '@/three/baseFactories'
 
 export class BeadScene {
   scene: THREE.Scene
@@ -23,6 +24,9 @@ export class BeadScene {
   private baseRangeCircle: THREE.Mesh | null = null
   private beadMeshes: Map<string, THREE.Mesh> = new Map()
   private warningBeads: Set<string> = new Set()
+  private layerMeshIndex: Map<number, Set<string>> = new Map()
+  private previousBeads: Map<string, Bead> = new Map()
+  private currentGridSize: number = 4
   private animationId: number = 0
 
   private isDragging = false
@@ -169,162 +173,70 @@ export class BeadScene {
     this.renderer.render(this.scene, this.camera)
   }
 
-  private createKeychainBase(dim: typeof BASE_DIMENSIONS.keychain): THREE.Group {
-    const group = new THREE.Group()
-    const { width, depth, height, offsetX, offsetZ } = dim
-
-    const baseShape = new THREE.Shape()
-    const r = 0.6
-    const w = width / 2 - r
-    const d = depth / 2 - r
-    baseShape.absarc(w, d, r, 0, Math.PI / 2)
-    baseShape.absarc(-w, d, r, Math.PI / 2, Math.PI)
-    baseShape.absarc(-w, -d, r, Math.PI, Math.PI * 1.5)
-    baseShape.absarc(w, -d, r, Math.PI * 1.5, Math.PI * 2)
-
-    const extrudeSettings = {
-      depth: height,
-      bevelEnabled: true,
-      bevelThickness: 0.08,
-      bevelSize: 0.08,
-      bevelSegments: 3,
-    }
-    const baseGeo = new THREE.ExtrudeGeometry(baseShape, extrudeSettings)
-    baseGeo.rotateX(-Math.PI / 2)
-    baseGeo.translate(offsetX, -height, offsetZ)
-
-    const baseMat = new THREE.MeshStandardMaterial({
-      color: 0x6d4c41,
-      roughness: 0.6,
-      metalness: 0.15,
-    })
-    const baseMesh = new THREE.Mesh(baseGeo, baseMat)
-    baseMesh.castShadow = true
-    baseMesh.receiveShadow = true
-    group.add(baseMesh)
-
-    const hangerGeo = new THREE.TorusGeometry(0.35, 0.08, 12, 24)
-    const hangerMat = new THREE.MeshStandardMaterial({
-      color: 0xd4af37,
-      roughness: 0.3,
-      metalness: 0.8,
-    })
-    const hanger = new THREE.Mesh(hangerGeo, hangerMat)
-    hanger.rotation.y = Math.PI / 2
-    hanger.position.set(offsetX, -height / 2 - 0.5, offsetZ - depth / 2)
-    hanger.castShadow = true
-    group.add(hanger)
-
-    const linkGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.5, 12)
-    const link = new THREE.Mesh(linkGeo, hangerMat)
-    link.position.set(offsetX, -height / 2 - 0.3, offsetZ - depth / 2 + 0.35)
-    link.rotation.x = Math.PI / 2
-    group.add(link)
-
-    return group
+  private getBeadWorldPosition(bead: Bead, gridSize: number): THREE.Vector3 {
+    const half = (gridSize - 1) / 2
+    const step = BEAD_SIZE + BEAD_GAP
+    return new THREE.Vector3(
+      (bead.col - half) * step,
+      bead.layer * LAYER_HEIGHT,
+      (bead.row - half) * step,
+    )
   }
 
-  private createOrnamentBase(dim: typeof BASE_DIMENSIONS.ornament): THREE.Group {
-    const group = new THREE.Group()
-    const { width, depth, height, offsetX, offsetZ } = dim
-
-    const cylGeo = new THREE.CylinderGeometry(
-      Math.min(width, depth) / 2,
-      Math.min(width, depth) / 2 + 0.15,
-      height,
-      48,
-      2,
-      false,
-    )
-    const cylMat = new THREE.MeshStandardMaterial({
-      color: 0x5d4037,
-      roughness: 0.7,
-      metalness: 0.1,
-    })
-    const base = new THREE.Mesh(cylGeo, cylMat)
-    base.position.set(offsetX, -height / 2, offsetZ)
-    base.castShadow = true
-    base.receiveShadow = true
-    group.add(base)
-
-    const rimGeo = new THREE.TorusGeometry(Math.min(width, depth) / 2, 0.06, 12, 48)
-    const rimMat = new THREE.MeshStandardMaterial({
-      color: 0x8d6e63,
+  private addBeadMesh(bead: Bead, gridSize: number, isWarning: boolean, isHidden: boolean): THREE.Mesh {
+    const color = COLOR_PALETTE[bead.colorId] || COLOR_PALETTE.H01
+    const geo = new THREE.BoxGeometry(BEAD_SIZE * 0.9, BEAD_SIZE * 0.9, BEAD_SIZE * 0.9)
+    const mat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(isWarning ? 0xff8800 : color.hex),
       roughness: 0.5,
-      metalness: 0.2,
+      metalness: 0.05,
+      transparent: true,
+      opacity: isHidden ? 0.15 : 1,
     })
-    const rim = new THREE.Mesh(rimGeo, rimMat)
-    rim.rotation.x = Math.PI / 2
-    rim.position.set(offsetX, -0.02, offsetZ)
-    rim.receiveShadow = true
-    group.add(rim)
+    const mesh = new THREE.Mesh(geo, mat)
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    mesh.position.copy(this.getBeadWorldPosition(bead, gridSize))
+    this.beadGroup.add(mesh)
+    this.beadMeshes.set(bead.id, mesh)
 
-    const ridgeGeo = new THREE.CylinderGeometry(
-      Math.min(width, depth) / 2 - 0.15,
-      Math.min(width, depth) / 2 - 0.12,
-      0.08,
-      48,
-    )
-    const ridge = new THREE.Mesh(ridgeGeo, rimMat)
-    ridge.position.set(offsetX, -height + 0.04, offsetZ)
-    group.add(ridge)
+    if (!this.layerMeshIndex.has(bead.layer)) {
+      this.layerMeshIndex.set(bead.layer, new Set())
+    }
+    this.layerMeshIndex.get(bead.layer)!.add(bead.id)
 
-    return group
+    return mesh
   }
 
-  private createPhoneStandBase(dim: typeof BASE_DIMENSIONS.phonestand): THREE.Group {
-    const group = new THREE.Group()
-    const { width, depth, height, offsetX, offsetZ } = dim
+  private removeBeadMesh(id: string) {
+    const mesh = this.beadMeshes.get(id)
+    if (!mesh) return
 
-    const baseGeo = new THREE.BoxGeometry(width, height, depth)
-    const baseMat = new THREE.MeshStandardMaterial({
-      color: 0x4e342e,
-      roughness: 0.65,
-      metalness: 0.1,
-    })
-    const base = new THREE.Mesh(baseGeo, baseMat)
-    base.position.set(offsetX, -height / 2, offsetZ)
-    base.castShadow = true
-    base.receiveShadow = true
-    group.add(base)
+    this.beadGroup.remove(mesh)
+    mesh.geometry.dispose()
+    ;(mesh.material as THREE.Material).dispose()
+    this.beadMeshes.delete(id)
 
-    const backHeight = 4.5
-    const backThickness = 0.4
-    const backGeo = new THREE.BoxGeometry(width, backHeight, backThickness)
-    const back = new THREE.Mesh(backGeo, baseMat)
-    back.position.set(
-      offsetX,
-      -height / 2 + backHeight / 2,
-      offsetZ + depth / 2 - backThickness / 2,
-    )
-    back.rotation.x = -0.25
-    back.castShadow = true
-    back.receiveShadow = true
-    group.add(back)
+    const bead = this.previousBeads.get(id)
+    if (bead) {
+      const layerSet = this.layerMeshIndex.get(bead.layer)
+      if (layerSet) {
+        layerSet.delete(id)
+        if (layerSet.size === 0) {
+          this.layerMeshIndex.delete(bead.layer)
+        }
+      }
+    }
+  }
 
-    const ledgeGeo = new THREE.BoxGeometry(width, 0.5, 0.8)
-    const ledge = new THREE.Mesh(ledgeGeo, baseMat)
-    ledge.position.set(
-      offsetX,
-      -height / 2 + 0.25,
-      offsetZ - depth / 2 + 0.4,
-    )
-    ledge.castShadow = true
-    ledge.receiveShadow = true
-    group.add(ledge)
+  private updateBeadMesh(bead: Bead, isWarning: boolean, isHidden: boolean) {
+    const mesh = this.beadMeshes.get(bead.id)
+    if (!mesh) return
 
-    const padGeo = new THREE.BoxGeometry(width - 0.4, 0.06, depth - 1.5)
-    const padMat = new THREE.MeshStandardMaterial({
-      color: 0x3e2723,
-      roughness: 0.9,
-      metalness: 0,
-    })
-    const pad = new THREE.Mesh(padGeo, padMat)
-    pad.position.set(offsetX, -height / 2 + height + 0.03, offsetZ)
-    pad.receiveShadow = true
-    group.add(pad)
-
-    return group
+    const color = COLOR_PALETTE[bead.colorId] || COLOR_PALETTE.H01
+    const mat = mesh.material as THREE.MeshStandardMaterial
+    mat.color.set(isWarning ? 0xff8800 : color.hex)
+    mat.opacity = isHidden ? 0.15 : 1
   }
 
   setBase(type: BaseType, gridSize: number) {
@@ -349,13 +261,7 @@ export class BeadScene {
 
     const dim = BASE_DIMENSIONS[type]
 
-    if (type === 'keychain') {
-      this.baseGroup = this.createKeychainBase(dim as typeof BASE_DIMENSIONS.keychain)
-    } else if (type === 'ornament') {
-      this.baseGroup = this.createOrnamentBase(dim as typeof BASE_DIMENSIONS.ornament)
-    } else {
-      this.baseGroup = this.createPhoneStandBase(dim as typeof BASE_DIMENSIONS.phonestand)
-    }
+    this.baseGroup = createBaseByType(type)
     this.scene.add(this.baseGroup)
 
     const ringGeo = new THREE.RingGeometry(
@@ -387,6 +293,8 @@ export class BeadScene {
     }
     this.beadMeshes.clear()
     this.warningBeads.clear()
+    this.layerMeshIndex.clear()
+    this.previousBeads.clear()
   }
 
   updateBeads(
@@ -395,53 +303,81 @@ export class BeadScene {
     warningCells: Array<{ layer: number; row: number; col: number }>,
     hiddenLayers: Set<number>,
   ) {
-    const half = (gridSize - 1) / 2
-    const step = BEAD_SIZE + BEAD_GAP
     const warningSet = new Set(warningCells.map(c => `b-${c.layer}-${c.row}-${c.col}`))
     this.warningBeads = warningSet
 
-    const currentIds = new Set(beads.map(b => b.id))
-    for (const [id, mesh] of this.beadMeshes) {
-      if (!currentIds.has(id)) {
-        this.beadGroup.remove(mesh)
-        mesh.geometry.dispose()
-        ;(mesh.material as THREE.Material).dispose()
-        this.beadMeshes.delete(id)
+    if (gridSize !== this.currentGridSize) {
+      this.clearBeads()
+      this.currentGridSize = gridSize
+    }
+
+    const newBeadsMap = new Map<string, Bead>()
+    for (const bead of beads) {
+      newBeadsMap.set(bead.id, bead)
+    }
+
+    for (const [id] of this.previousBeads) {
+      if (!newBeadsMap.has(id)) {
+        this.removeBeadMesh(id)
       }
+    }
+
+    const prevWarningBeads = new Set(this.warningBeads)
+    const prevHiddenLayers = new Set<number>()
+    for (const [layerIdx, ids] of this.layerMeshIndex) {
+      const allInLayer = this.previousBeads
+      let hasVisible = false
+      for (const id of ids) {
+        const b = allInLayer.get(id)
+        if (b && !hiddenLayers.has(b.layer)) {
+          hasVisible = true
+          break
+        }
+      }
+      if (!hasVisible) prevHiddenLayers.add(layerIdx)
     }
 
     for (const bead of beads) {
-      const color = COLOR_PALETTE[bead.colorId] || COLOR_PALETTE.H01
-      const isWarning = warningSet.has(bead.id)
+      const id = bead.id
+      const isWarning = warningSet.has(id)
       const isHidden = hiddenLayers.has(bead.layer)
+      const prevBead = this.previousBeads.get(id)
 
-      let mesh = this.beadMeshes.get(bead.id)
-      if (!mesh) {
-        const geo = new THREE.BoxGeometry(BEAD_SIZE * 0.9, BEAD_SIZE * 0.9, BEAD_SIZE * 0.9)
-        const mat = new THREE.MeshStandardMaterial({
-          color: new THREE.Color(color.hex),
-          roughness: 0.5,
-          metalness: 0.05,
-          transparent: true,
-          opacity: isHidden ? 0.15 : 1,
-        })
-        mesh = new THREE.Mesh(geo, mat)
-        mesh.castShadow = true
-        mesh.receiveShadow = true
-        this.beadGroup.add(mesh)
-        this.beadMeshes.set(bead.id, mesh)
+      if (!prevBead) {
+        this.addBeadMesh(bead, gridSize, isWarning, isHidden)
       } else {
-        const mat = mesh.material as THREE.MeshStandardMaterial
-        mat.color.set(isWarning ? 0xff8800 : color.hex)
-        mat.opacity = isHidden ? 0.15 : 1
-      }
+        const colorChanged = prevBead.colorId !== bead.colorId
+        const layerChanged = prevBead.layer !== bead.layer
+        const rowChanged = prevBead.row !== bead.row
+        const colChanged = prevBead.col !== bead.col
+        const wasWarning = prevWarningBeads.has(id)
+        const wasHidden = prevHiddenLayers.has(prevBead.layer)
 
-      mesh.position.set(
-        (bead.col - half) * step,
-        bead.layer * LAYER_HEIGHT,
-        (bead.row - half) * step,
-      )
+        if (colorChanged || isWarning !== wasWarning || isHidden !== wasHidden) {
+          this.updateBeadMesh(bead, isWarning, isHidden)
+        }
+
+        if (layerChanged || rowChanged || colChanged) {
+          if (layerChanged) {
+            const oldLayerSet = this.layerMeshIndex.get(prevBead.layer)
+            if (oldLayerSet) {
+              oldLayerSet.delete(id)
+              if (oldLayerSet.size === 0) this.layerMeshIndex.delete(prevBead.layer)
+            }
+            if (!this.layerMeshIndex.has(bead.layer)) {
+              this.layerMeshIndex.set(bead.layer, new Set())
+            }
+            this.layerMeshIndex.get(bead.layer)!.add(id)
+          }
+          const mesh = this.beadMeshes.get(id)
+          if (mesh) {
+            mesh.position.copy(this.getBeadWorldPosition(bead, gridSize))
+          }
+        }
+      }
     }
+
+    this.previousBeads = newBeadsMap
 
     if (this.cogProjection) {
       const dim = BASE_DIMENSIONS.keychain
@@ -494,14 +430,15 @@ export class BeadScene {
   }
 
   setLayerOpacity(layerIndex: number, visible: boolean) {
-    for (const [id, mesh] of this.beadMeshes) {
-      const parts = id.split('-')
-      const l = parseInt(parts[1], 10)
-      if (l === layerIndex) {
-        const mat = mesh.material as THREE.MeshStandardMaterial
-        mat.opacity = visible ? (this.warningBeads.has(id) ? 1 : 1) : 0.1
-        mat.transparent = true
-      }
+    const layerIds = this.layerMeshIndex.get(layerIndex)
+    if (!layerIds) return
+
+    for (const id of layerIds) {
+      const mesh = this.beadMeshes.get(id)
+      if (!mesh) continue
+      const mat = mesh.material as THREE.MeshStandardMaterial
+      mat.opacity = visible ? 1 : 0.1
+      mat.transparent = true
     }
   }
 
