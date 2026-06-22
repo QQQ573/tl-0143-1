@@ -1,5 +1,8 @@
 import { create } from 'zustand'
+import { snapshotDB, type Snapshot } from '@/lib/snapshotDB'
 import { calculateCenterOfGravity as computeCOG } from '@/lib/cog'
+
+export const MAX_SNAPSHOTS = 8
 
 export const COLOR_PALETTE: Record<string, { hex: string; weight: number; name: string }> = {
   H01: { hex: '#FFFFFF', weight: 1.00, name: '乳白' },
@@ -73,6 +76,8 @@ interface StoreState {
   currentColor: string
   baseType: BaseType
   hangerPositions: string[]
+  snapshots: Snapshot[]
+  isLoadingSnapshots: boolean
 
   addLayer: () => void
   removeLayer: (index: number) => void
@@ -90,6 +95,12 @@ interface StoreState {
   getBeadAt: (layer: number, row: number, col: number) => Bead | undefined
   getVisibleBeads: () => Bead[]
   calculateCenterOfGravity: () => CenterOfGravity
+  calculateTotalWeight: () => number
+
+  loadSnapshots: () => Promise<void>
+  saveSnapshot: (name: string) => Promise<{ success: boolean; overwrote: boolean; message?: string }>
+  deleteSnapshot: (id: number) => Promise<void>
+  applySnapshot: (snapshot: Snapshot) => void
 }
 
 const beadId = (layer: number, row: number, col: number) => `b-${layer}-${row}-${col}`
@@ -108,6 +119,8 @@ export const useBeadStore = create<StoreState>((set, get) => ({
   currentColor: 'H03',
   baseType: 'ornament',
   hangerPositions: [],
+  snapshots: [],
+  isLoadingSnapshots: false,
 
   addLayer: () => set(s => {
     const maxIdx = s.layers.length > 0 ? Math.max(...s.layers.map(l => l.index)) : -1
@@ -177,5 +190,80 @@ export const useBeadStore = create<StoreState>((set, get) => ({
   calculateCenterOfGravity: () => {
     const s = get()
     return computeCOG(s.beads, s.baseType, s.gridSize)
+  },
+
+  calculateTotalWeight: () => {
+    const { beads } = get()
+    let total = 0
+    for (const bead of beads) {
+      const color = COLOR_PALETTE[bead.colorId] || COLOR_PALETTE.H01
+      total += color.weight
+    }
+    return total
+  },
+
+  loadSnapshots: async () => {
+    set({ isLoadingSnapshots: true })
+    try {
+      const snapshots = await snapshotDB.getAll()
+      set({ snapshots, isLoadingSnapshots: false })
+    } catch {
+      set({ isLoadingSnapshots: false })
+    }
+  },
+
+  saveSnapshot: async (name: string) => {
+    const s = get()
+    const cog = computeCOG(s.beads, s.baseType, s.gridSize)
+    const totalWeight = s.beads.reduce((sum, b) => {
+      const c = COLOR_PALETTE[b.colorId] || COLOR_PALETTE.H01
+      return sum + c.weight
+    }, 0)
+
+    const snapshotData = {
+      name,
+      createdAt: Date.now(),
+      beads: s.beads.map(b => ({ ...b })),
+      layers: s.layers.map(l => ({ ...l })),
+      gridSize: s.gridSize,
+      baseType: s.baseType,
+      hangerPositions: [...s.hangerPositions],
+      cog: {
+        projectedX: cog.projectedX,
+        projectedZ: cog.projectedZ,
+        y: cog.y,
+        overhangRatio: cog.overhangRatio,
+        withinBase: cog.withinBase,
+        totalWeight: Math.round(totalWeight * 100) / 100,
+      },
+    }
+
+    const count = await snapshotDB.getCount()
+    let overwrote = false
+    if (count >= MAX_SNAPSHOTS) {
+      await snapshotDB.deleteOldest()
+      overwrote = true
+    }
+
+    await snapshotDB.add(snapshotData)
+    const snapshots = await snapshotDB.getAll()
+    set({ snapshots })
+    return { success: true, overwrote, message: overwrote ? '已保存（自动覆盖最早快照）' : '已保存' }
+  },
+
+  deleteSnapshot: async (id: number) => {
+    await snapshotDB.delete(id)
+    const snapshots = await snapshotDB.getAll()
+    set({ snapshots })
+  },
+
+  applySnapshot: (snapshot: Snapshot) => {
+    set({
+      beads: snapshot.beads.map(b => ({ ...b })),
+      layers: snapshot.layers.map(l => ({ ...l })),
+      gridSize: snapshot.gridSize,
+      baseType: snapshot.baseType as BaseType,
+      hangerPositions: [...snapshot.hangerPositions],
+    })
   },
 }))
